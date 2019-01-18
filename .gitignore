@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Unit test / coverage reports
+.cache
+
+# Annoying Mac File
+.DC_Store
+
+# workbook test files
+test/feature_workbook.ipynb
+test/.ipynb_checkpoints/*
+test/worksheet.py
+
+# distribution
+dist
+build
+
+# egg_info
+dfply.egg_info
