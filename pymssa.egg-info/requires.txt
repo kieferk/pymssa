@@ -1,0 +1,8 @@
+pandas
+numpy
+pytest
+scipy
+numba
+tqdm
+matplotlib
+toolz
