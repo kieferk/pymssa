@@ -317,7 +317,7 @@ class MSSA:
         if self.verbose:
             print('Constructing components')
 
-        self.components_, self.elementary_matrix_ = incremental_component_reconstruction(
+        self.components_ = incremental_component_reconstruction(
             self.trajectory_matrix_,
             self.left_singular_vectors_,
             self.singular_values_,

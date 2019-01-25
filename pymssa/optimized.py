@@ -1,5 +1,5 @@
 import numpy as np
-from numba import jit, prange
+from numba import jit, prange, guvectorize
 
 from .ops import *
 
@@ -55,6 +55,21 @@ def structured_varimax(U, n_timeseries, window, gamma=1, tol=1e-6, max_iter=2500
     return T
 
 
+
+@jit(nopython=True, fastmath=True)
+def calculate_factor_vectors(trajectory_matrix,
+                             left_singular_vectors,
+                             singular_values,
+                             rank):
+    # The "factor vectors" are defined as X.T U / sqrt(s)
+    # Where X is the trajectory matrix, U is the left-singular vectors,
+    # and s are the singular values
+    U = left_singular_vectors[:, :rank]
+    factor_vectors = np.dot(trajectory_matrix.T, U) / singular_values[:rank]
+    factor_vectors = factor_vectors.T
+    return factor_vectors
+
+
 @jit(nopython=True, fastmath=True)
 def elementary_matrix_at_rank(trajectory_matrix,
                               left_singular_vectors,
@@ -87,7 +102,6 @@ def construct_elementary_matrix(trajectory_matrix,
     return elementary_matrix
 
 
-
 @jit(nopython=True, fastmath=True)
 def vtmat_ts_startidx(timeseries_index, L):
     return L * timeseries_index
@@ -103,7 +117,7 @@ def vtmat_ts_endidx(timeseries_index, L):
 def elementary_matrix_for_timeseries_index(elementary_matrix, ts_idx, L):
     sidx = vtmat_ts_startidx(ts_idx, L)
     eidx = vtmat_ts_endidx(ts_idx, L)
-    return elementary_matrix[sidx:eidx, :, :]
+    return elementary_matrix[sidx:eidx]
 
 
 @jit(nopython=True, fastmath=True)
@@ -121,21 +135,16 @@ def reshape_elementary_matrix_by_timeseries_index(elementary_matrix, P, L):
     return elementary_matrices
 
 
-
 @jit(nopython=True, fastmath=True)
-def diagonal_averager(trajectory_matrix):
+def diagonal_averager(trajectory_matrix, allocated_output):
     # Reconstruct a timeseries from a trajectory matrix using diagonal
     # averaging procedure.
     # https://arxiv.org/pdf/1309.5050.pdf
 
     r_matrix = trajectory_matrix[::-1]
-    unraveled = []
-    for i in range(-r_matrix.shape[0]+1, r_matrix.shape[1]):
-        tp_diag = np.diag(r_matrix, k=i)
-        tp = np.mean(tp_diag)
-        unraveled.append(tp)
-    unraveled = np.array(unraveled)
-    return unraveled
+    for i, d in enumerate(range(-r_matrix.shape[0]+1, r_matrix.shape[1])):
+        tp_diag = np.diag(r_matrix, k=d)
+        allocated_output[i] = np.mean(tp_diag)
 
 
 
@@ -149,8 +158,7 @@ def diagonal_average_each_component(elementary_matrix,
 
     for i, c in enumerate(components):
         at_component = elementary_matrix[:, :, c]
-        recon = diagonal_averager(at_component)
-        reconstructions[:, i] = recon
+        diagonal_averager(at_component, reconstructions[:, i])
 
     return reconstructions
 
@@ -170,39 +178,43 @@ def diagonal_average_at_components(elementary_matrix,
 
 
 
-@jit(nopython=True, fastmath=True)
-def calculate_factor_vectors(trajectory_matrix,
-                             left_singular_vectors,
-                             singular_values,
-                             rank):
-    # The "factor vectors" are defined as X.T U / sqrt(s)
-    # Where X is the trajectory matrix, U is the left-singular vectors,
-    # and s are the singular values
-    U = left_singular_vectors[:, :rank]
-    factor_vectors = np.dot(trajectory_matrix.T, U) / singular_values[:rank]
-    factor_vectors = factor_vectors.T
-    return factor_vectors
 
 
-@jit(nopython=True, fastmath=True)
-def _incremental_component_reconstruction_inner(elementary_matrix,
-                                             ts_idx,
-                                             component_range,
-                                             L,
-                                             N):
-    elementary_matrix_p = elementary_matrix_for_timeseries_index(
-        elementary_matrix,
-        ts_idx,
-        L
-    )
+@jit(nopython=True, fastmath=True, parallel=True)
+def _incremental_component_reconstruction_inner(trajectory_matrix,
+                                                components,
+                                                left_singular_vectors,
+                                                P,
+                                                L):
 
-    components_p = diagonal_average_each_component(
-        elementary_matrix_p,
-        component_range,
-        N
-    )
+    for r in prange(components.shape[2]):
+        elementary_matrix_r = elementary_matrix_at_rank(
+            trajectory_matrix,
+            left_singular_vectors,
+            r
+        )
 
-    return components_p
+        for ts_idx in range(P):
+            diagonal_averager(
+                elementary_matrix_r[(L * ts_idx):(L * (ts_idx+1))],
+                components[ts_idx, :, r]
+            )
+
+    return components
+
+    # elementary_matrix_p = elementary_matrix_for_timeseries_index(
+    #     elementary_matrix,
+    #     ts_idx,
+    #     L
+    # )
+    #
+    # components_p = diagonal_average_each_component(
+    #     elementary_matrix_p,
+    #     component_range,
+    #     N
+    # )
+    #
+    # return components_p
 
 
 @jit(nopython=True, fastmath=True)
@@ -215,25 +227,16 @@ def incremental_component_reconstruction(trajectory_matrix,
                                       L):
 
     components = np.zeros((P, N, rank))
-    component_range = np.arange(rank)
 
-    elementary_matrix = construct_elementary_matrix(
+    components = _incremental_component_reconstruction_inner(
         trajectory_matrix,
+        components,
         left_singular_vectors,
-        singular_values,
-        rank
+        P,
+        L
     )
 
-    for ts_idx in prange(P):
-        components[ts_idx, :, :] = _incremental_component_reconstruction_inner(
-            elementary_matrix,
-            ts_idx,
-            component_range,
-            L,
-            N
-        )
-
-    return components, elementary_matrix
+    return components
 
 
 
