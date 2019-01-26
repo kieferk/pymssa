@@ -1,0 +1,12 @@
+README.md
+setup.py
+pymssa/__init__.py
+pymssa/mssa.py
+pymssa/ops.py
+pymssa/optimized.py
+pymssa.egg-info/PKG-INFO
+pymssa.egg-info/SOURCES.txt
+pymssa.egg-info/dependency_links.txt
+pymssa.egg-info/not-zip-safe
+pymssa.egg-info/requires.txt
+pymssa.egg-info/top_level.txt

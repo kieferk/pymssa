@@ -1,0 +1,13 @@
+Metadata-Version: 1.1
+Name: pymssa
+Version: 0.1.0
+Summary: Multivariate Singular Spectrum Analysis (MSSA)
+Home-page: https://github.com/kieferk/pymssa.git
+Author: Kiefer Katovich
+Author-email: kiefer.katovich@gmail.com
+License: UNKNOWN
+Description: UNKNOWN
+Keywords: Python Multivariate Singular Spectrum Analysis MSSA
+Platform: UNKNOWN
+Classifier: Programming Language :: Python :: 3.6
+Classifier: Programming Language :: Python :: 3.7
