@@ -17,10 +17,151 @@ from sklearn.metrics import explained_variance_score
 
 
 class MSSA:
+    '''Multivariate Singular Spectrum Analysis
+
+    Implements MSSA decomposition and (recurrent) forecasting using MSSA. This
+    implementation uses the vertical (V-MSSA) rather than horizontal (H-MSSA)
+    structure for the trajectory matrix.
+
+
+    Parameters
+    ----------
+    window_size : int | None
+        The window size parameter controls the dimensionality of the trajectory
+        matrices constructed for each timeseries (and then stacked). Timeseries
+        are converted into trajectory matrices through "hankelization", where
+        columns and rows represent different "windows" of the timeseries,
+        incrementing across the timeseries. With window_size = L, the resulting
+        trajectory matrix of a timeseries vector (N) will be of shape (L, K), where
+        K = N - L + 1. As such, window_size should be no greater than N // 2. If
+        left as None, MSSA will select the maximum possible window size.
+
+        Note that with a multivariate timeseries input matrix (N, P), the resulting
+        trajectory matrix stacked vertically will be of shape (P * L, K).
+
+        The window size parameter can have a significant impact on the quality of
+        the MSSA decomposition and forecasting. Some recommend that window
+        size should be as large as possible to capture the most signal
+        in the data, but there does not seem to be general agreement on a "best"
+        window size. The author of the MSSA algorithm states in one of her papers
+        that it is best to try many different window size parameters to see what
+        works best with your data. If you have an idea of what frequency signal
+        will occur in your data, try out window sizes that are multiples of that
+        frequency (e.g. 24, 36, 48 if you have monthly data).
+
+    n_components: int | None | 'variance_threshold' | 'parallel_analysis' | 'svht'
+        Argument specifing the number of components to keep from the SVD decomposition.
+        This is the equivalent of the n_components parameter in sklearn's PCA,
+        for example. If None, the maximum number of (non-zero singular value)
+        components will be selected.
+
+        There are a few autmatic options for component selection:
+        - 'svht'
+            Select components using the Singular Value Hard Thresholding
+            formula. This is the default setting. For more details on this
+            formula please see this paper: https://arxiv.org/pdf/1305.5870.pdf
+        - 'parallel_analysis'
+            Performs parallel analysis to select the number of components that
+            outperform a user-specified percentile threshold of noise components
+            from randomly generated datasets of the same shape. Parallel analysis
+            is a gold standard method for selecting a number of components in
+            principal component analysis, which MSSA is closely related to.
+            Eigenvalue noise threshold is set via the `pa_percentile_threshold`
+            argument. Note that this procedure can be very slow depending on
+            the size of your data.
+        - 'variance_threshold'
+            Select the number of components based on a variance explained percent
+            threshold. The threshold cutoff is specified by the argument
+            `variance_explained_threshold`
+
+    variance_explained_threshold : float | None
+        If `n_components = 'variance_threshold'`, this argument controls the
+        cutoff for keeping components based on cumulative variance explained. This
+        must be a float between 0 and 1. A value of 0.95, for example, will
+        keep the number of components that explain 95 percent of the variance.
+        This has no effect unless 'variance_threshold' is the selected method for
+        `n_components`.
+
+    pa_percentile_threshold : float | None
+        If `n_components = 'parallel_analysis'`, this specifies the percentile
+        of noise eigenvalues that must be exceeded by the real eigenvalues for
+        components to be kept. Should be a number between 0 and 100. This has no
+        effect unless 'parallel_analysis' is selected for `n_components`.
+
+    svd_method : str
+        Can be one of:
+        - 'randomized'
+            The default. Uses the `randomized_svd` method from scikit-learn to
+            perform the singular value decomposition step. It is highly recommended
+            that you keep this argument as 'randomized', especially if you are
+            dealing with large data.
+        - 'exact'
+            Performs exact SVD via numpy.linalg.svd. This should be OK for small
+            or even medium size datasets, but is not recommended.
+
+    varimax : bool
+        [EXPERIMENTAL] If `True`, performs a structured varimax rotation on the
+        left singular vectors following the SVD decomposition step in the
+        MSSA algorithm. This should be used with caution as the code is experimental.
+        The idea of applying structured varimax is to better separate the components
+        for the multiple timeseries fit by MSSA. See this presentation for
+        more information on the structured varimax rotation applied to MSSA:
+        http://200.145.112.249/webcast/files/SeminarMAR2017-ICTP-SAIFR.pdf
+
+    verbose : bool
+        Verbosity flag. If true, will print out status updates during the fit
+        procedure.
+
+
+    Attributes
+    ----------
+    These attributes will become available after fitting.
+
+    N_ : int
+        Observations in timeseries.
+    P_ : int
+        Number of timeseries.
+    L_ : int
+        Window size of trajectory matrices.
+    K_ : int
+        Column dimension of trajectory matrices.
+    rank_ : int
+        The selected rank (number of components kept)
+    left_singular_vectors_ : numpy.ndarray
+        The left singular vectors from the decomposition of the covariance of
+        trajectory matrices via SVD.
+    singular_values_ : numpy.ndarray
+        Singular values from SVD
+    explained_variance_ : numpy.ndarray
+        The explained variance of the SVD components
+    explained_variance_ratio_ : numpy.ndarray
+        Percent of explained variance for each component
+    components_ : numpy.ndarray
+        The MSSA components. This is the result of the decomposition and
+        reconstruction via diagonal averaging. The sum of all the components
+        for a timeseries (without reducing number of components) will perfectly
+        reconstruct the original timeseries.
+        The dimension of this matrix is (P, N, rank), where P is the number
+        of timeseries, N is the number of observations, and rank is the
+        number of components selected to keep.
+    component_ranks_ : numpy.ndarray
+        This matrix shows the rank of each component per timeseries according
+        to the reconstruction error. This is a (rank, P) matrix, with rank
+        being the number of components and P the number of timeseries. For
+        example, if component_ranks_[0, 0] = 3, this would mean that the
+        3rd component accounts for the most variance for the first timeseries.
+    component_ranks_explained_variance_ : numpy.ndarray
+        This shows the explained variance percent for the ranked components
+        per timeseries. Like component_ranks_, this is a (rank, P) matrix.
+        The values in this matrix correspond to the percent of variance
+        explained by components per timeseries in rank order of their
+        efficiency in reconstructing the timeseries.
+    '''
+
 
     def __init__(self,
                  window_size=None,
-                 n_components=None,
+                 n_components='svht',
                  variance_explained_threshold=0.95,
                  pa_percentile_threshold=95,
                  svd_method='randomized',
@@ -58,15 +199,21 @@ class MSSA:
         return self
 
 
-    def apply_structured_varimax(self,
-                                 left_singular_vectors,
-                                 singular_values,
-                                 P,
-                                 L,
-                                 gamma=1,
-                                 tol=1e-6,
-                                 max_iter=1000):
-        # http://200.145.112.249/webcast/files/SeminarMAR2017-ICTP-SAIFR.pdf
+    def _apply_structured_varimax(self,
+                                  left_singular_vectors,
+                                  singular_values,
+                                  P,
+                                  L,
+                                  gamma=1,
+                                  tol=1e-6,
+                                  max_iter=1000):
+        '''
+        [EXPERIMENTAL]
+        Applies the structured varimax rotation to the left singular vectors
+        and singular values. For more information on this procedure in MSSA please
+        see this slideshow:
+        http://200.145.112.249/webcast/files/SeminarMAR2017-ICTP-SAIFR.pdf
+        '''
 
         T = structured_varimax(
             left_singular_vectors,
@@ -85,13 +232,27 @@ class MSSA:
 
 
 
-    def parallel_analysis_component_selection(self,
-                                              timeseries,
-                                              L,
-                                              K,
-                                              rank,
-                                              singular_values,
-                                              iterations=100):
+    def _parallel_analysis_component_selection(self,
+                                               timeseries,
+                                               L,
+                                               K,
+                                               rank,
+                                               singular_values,
+                                               iterations=100):
+        '''
+        Performs parallel analysis to help select the appropriate number of MSSA
+        components to keep. The algorithm follows these steps:
+        1. Calculate the eigenvalues via SVD/PCA on your real dataset.
+        2. For a given number of iterations:
+            3. Construct a random noise matrix the same shape as your real data.
+            4. Perform decomposition of the random noise data.
+            5. Calculate the eigenvalues for the noise data and track them per
+               iteration.
+        6. Calculate the percentile at a user-specified threshold of the noise
+           eigenvalues at each position.
+        7. Select only the number of components in the real data whose eigenvalues
+           exceed those at the specified percentile of the noise eigenvalues.
+        '''
 
         def _bootstrap_eigenvalues(ts_std, ts_shape, L, K, rank):
 
@@ -148,9 +309,14 @@ class MSSA:
 
 
 
-    def calculate_optimal_reconstruction_orders(self,
-                                                timeseries,
-                                                components):
+    def _calculate_optimal_reconstruction_orders(self,
+                                                 timeseries,
+                                                 components):
+        '''Calculates the optimal component ordering for reconstructing
+        each of the timeseries. This is done by simply ranking the components
+        in terms of how much variance they explain for each timeseries in the
+        original data.
+        '''
 
         optimal_orders = optimal_component_ordering(
             timeseries,
@@ -221,6 +387,59 @@ class MSSA:
 
     def fit(self,
             timeseries):
+        '''Performs MSSA decomposition on a univariate or multivariate timeseries.
+        Multivariate timeseries should have observations in rows and timeseries
+        indices in columns.
+
+        After fitting, many attributes become available to the user:
+        N_ : int
+            Observations in timeseries.
+        P_ : int
+            Number of timeseries.
+        L_ : int
+            Window size of trajectory matrices.
+        K_ : int
+            Column dimension of trajectory matrices.
+        rank_ : int
+            The selected rank (number of components kept)
+        left_singular_vectors_ : numpy.ndarray
+            The left singular vectors from the decomposition of the covariance of
+            trajectory matrices via SVD.
+        singular_values_ : numpy.ndarray
+            Singular values from SVD
+        explained_variance_ : numpy.ndarray
+            The explained variance of the SVD components
+        explained_variance_ratio_ : numpy.ndarray
+            Percent of explained variance for each component
+        components_ : numpy.ndarray
+            The MSSA components. This is the result of the decomposition and
+            reconstruction via diagonal averaging. The sum of all the components
+            for a timeseries (without reducing number of components) will perfectly
+            reconstruct the original timeseries.
+            The dimension of this matrix is (P, N, rank), where P is the number
+            of timeseries, N is the number of observations, and rank is the
+            number of components selected to keep.
+        component_ranks_ : numpy.ndarray
+            This matrix shows the rank of each component per timeseries according
+            to the reconstruction error. This is a (rank, P) matrix, with rank
+            being the number of components and P the number of timeseries. For
+            example, if component_ranks_[0, 0] = 3, this would mean that the
+            3rd component accounts for the most variance for the first timeseries.
+        component_ranks_explained_variance_ : numpy.ndarray
+            This shows the explained variance percent for the ranked components
+            per timeseries. Like component_ranks_, this is a (rank, P) matrix.
+            The values in this matrix correspond to the percent of variance
+            explained by components per timeseries in rank order of their
+            efficiency in reconstructing the timeseries.
+
+        Parameters
+        ----------
+        timeseries : numpy.ndarray | pandas.DataFrame | pandas.Series
+            The timeseries data to be decomposed. This will be converted to
+            a numpy array if it is in pandas format.
+        '''
+
+        timeseries = getattr(timeseries, 'values', timeseries)
 
         if timeseries.ndim == 1:
             timeseries = timeseries[:, np.newaxis]
@@ -265,7 +484,7 @@ class MSSA:
             if self.verbose:
                 print('Applying structured varimax to singular vectors')
 
-            self.left_singular_vectors_, self.singular_values_ = self.apply_structured_varimax(
+            self.left_singular_vectors_, self.singular_values_ = self._apply_structured_varimax(
                 self.left_singular_vectors_,
                 self.singular_values_,
                 self.P_,
@@ -299,7 +518,7 @@ class MSSA:
             if self.verbose:
                 print('Performing parallel analysis to determine optimal rank')
 
-            self.rank_ = self.parallel_analysis_component_selection(
+            self.rank_ = self._parallel_analysis_component_selection(
                 self.timeseries_,
                 self.L_,
                 self.K_,
@@ -330,17 +549,20 @@ class MSSA:
         if self.verbose:
             print('Calculating optimal reconstruction orders')
 
-        ranks, rank_exp_var = self.calculate_optimal_reconstruction_orders(
+        ranks, rank_exp_var = self._calculate_optimal_reconstruction_orders(
             self.timeseries_,
             self.components_
         )
         self.component_ranks_ = ranks
         self.component_ranks_explained_variance_ = rank_exp_var
 
+        return self
 
 
     @property
     def hankel_weights_(self):
+        '''The hankel weights are used to calculate the weighted correlation
+        between components'''
         weights = construct_hankel_weights(
             self.L_,
             self.K_,
@@ -351,6 +573,12 @@ class MSSA:
 
 
     def w_correlation(self, ts_components):
+        '''Calculates the w-correlation (weighted correlation) between timeseries
+        components according to the hankelization weights. The weighting is
+        required for an appropriate correlation measure since in the trajectory
+        matrix format of a timeseries observations end up repeated multiple times.
+        Observations that are in fewer "windows" of the trajectory matrix
+        are downweighted relative to those that appear in many windows.'''
         weights = self.hankel_weights_
         w_corr = hankel_weighted_correlation(
             ts_components,
@@ -363,6 +591,25 @@ class MSSA:
                  timepoints_out,
                  timeseries_indices=None,
                  use_components=None):
+        '''Forecasts out a number of timepoints using the recurrent forecasting
+        formula.
+
+        Parameters
+        ----------
+        timepoints_out : int
+            How many timepoints to forecast out from the final observation given
+            to fit in MSSA.
+        timeseries_indices : None | int | numpy.ndarray
+            If none, forecasting is done for all timeseries. If an int or array
+            of integers is specified, the forecasts for the timeseries at those
+            indices is performed. (In reality this will always forecast for all
+            timeseries then simply use this to filter the results at the end.)
+        use_components : None | int | numpy.ndarray
+            Components to use in the forecast. If None, all components will be
+            used. If an int, that number of top components will be selected (e.g
+            if `use_components = 10`, the first 10 components will be used). If
+            a numpy array, those compoents at the specified indices will be used.
+        '''
 
         if use_components is None:
             use_components = np.arange(left_singular_vectors.shape[1])

@@ -1,5 +1,5 @@
 import numpy as np
-from numba import jit, prange, guvectorize
+from numba import jit
 
 from .ops import *
 
@@ -136,15 +136,26 @@ def reshape_elementary_matrix_by_timeseries_index(elementary_matrix, P, L):
 
 
 @jit(nopython=True, fastmath=True)
-def diagonal_averager(trajectory_matrix, allocated_output):
+def diagonal_averager(elementary_matrix, allocated_output):
     # Reconstruct a timeseries from a trajectory matrix using diagonal
     # averaging procedure.
     # https://arxiv.org/pdf/1309.5050.pdf
 
-    r_matrix = trajectory_matrix[::-1]
+    r_matrix = elementary_matrix[::-1]
     for i, d in enumerate(range(-r_matrix.shape[0]+1, r_matrix.shape[1])):
         tp_diag = np.diag(r_matrix, k=d)
         allocated_output[i] = np.mean(tp_diag)
+
+
+
+@jit(nopython=True, fastmath=True)
+def batch_diagonal_averager(elementary_matrix, component_matrix_ref):
+    em_rev = elementary_matrix[:, ::-1, :]
+    lidx, ridx = -em_rev.shape[1]+1, em_rev.shape[2]
+    for i, offset in enumerate(range(lidx, ridx)):
+        for t in range(em_rev.shape[0]):
+            diag = np.diag(em_rev[t], k=offset)
+            component_matrix_ref[t, i] = np.mean(diag)
 
 
 
@@ -180,41 +191,27 @@ def diagonal_average_at_components(elementary_matrix,
 
 
 
-@jit(nopython=True, fastmath=True, parallel=True)
+@jit(nopython=True, fastmath=True)
 def _incremental_component_reconstruction_inner(trajectory_matrix,
                                                 components,
                                                 left_singular_vectors,
                                                 P,
                                                 L):
 
-    for r in prange(components.shape[2]):
+    for r in range(components.shape[2]):
         elementary_matrix_r = elementary_matrix_at_rank(
             trajectory_matrix,
             left_singular_vectors,
             r
         )
 
-        for ts_idx in range(P):
-            diagonal_averager(
-                elementary_matrix_r[(L * ts_idx):(L * (ts_idx+1))],
-                components[ts_idx, :, r]
-            )
+        batch_diagonal_averager(
+            elementary_matrix_r.reshape((P, L, -1)),
+            components[:, :, r]
+        )
 
     return components
 
-    # elementary_matrix_p = elementary_matrix_for_timeseries_index(
-    #     elementary_matrix,
-    #     ts_idx,
-    #     L
-    # )
-    #
-    # components_p = diagonal_average_each_component(
-    #     elementary_matrix_p,
-    #     component_range,
-    #     N
-    # )
-    #
-    # return components_p
 
 
 @jit(nopython=True, fastmath=True)
@@ -359,7 +356,7 @@ def vmssa_recurrent_forecast(timepoints_out,
                              left_singular_vectors,
                              P,
                              L,
-                             use_components=None):
+                             use_components):
 
     recons = components[:, :, use_components]
     recons = recons.sum(axis=2)

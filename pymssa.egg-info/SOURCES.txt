@@ -1,4 +1,5 @@
 README.md
+setup.py
 pymssa/__init__.py
 pymssa/mssa.py
 pymssa/ops.py
