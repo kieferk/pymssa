@@ -78,6 +78,3 @@ def singular_value_hard_threshold(singular_values,
     sv_threshold = threshold * median_sv
     adjusted_rank = np.sum(singular_values >= sv_threshold)
     return adjusted_rank
-
-
-

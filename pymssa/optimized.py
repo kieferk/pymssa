@@ -5,7 +5,7 @@ from .ops import *
 
 
 @jit(nopython=True, fastmath=True)
-def structured_varimax(U, n_timeseries, window, gamma=1, tol=1e-6, max_iter=2500):
+def structured_varimax(U, n_timeseries, window, gamma=1, tol=1e-8, max_iter=5000):
     # See:
     # http://200.145.112.249/webcast/files/SeminarMAR2017-ICTP-SAIFR.pdf
 
