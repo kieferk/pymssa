@@ -1,6 +1,8 @@
 import numpy as np
 from numpy.linalg import matrix_rank
 
+from pprint import pprint
+
 from scipy.spatial.distance import cdist, pdist, squareform
 from scipy.linalg import hankel
 
@@ -329,7 +331,7 @@ class MSSA:
         for ts_idx in range(timeseries.shape[1]):
             ts_comp = components[ts_idx, :, :]
             ts_comp = ts_comp[:, optimal_orders[:, ts_idx]]
-            ts_comp = np.cumsum(ts_comp, axis=1)
+            # ts_comp = np.cumsum(ts_comp, axis=1)
 
             order_explained_variance[:, ts_idx] = np.apply_along_axis(
                 partial(explained_variance_score, timeseries[:, ts_idx]),
@@ -556,6 +558,11 @@ class MSSA:
         self.component_ranks_ = ranks
         self.component_ranks_explained_variance_ = rank_exp_var
 
+        self.component_groups_ = {
+            ts_idx:[i for i in range(self.components_.shape[2])]
+            for ts_idx in range(self.P_)
+        }
+
         return self
 
 
@@ -586,6 +593,155 @@ class MSSA:
         )
         return w_corr
 
+    @property
+    def grouped_components_(self):
+        if getattr(self, 'component_groups_', None) is None:
+            return None
+
+        _cgrouped = {
+            ts_idx:np.concatenate([
+                self.components_[ts_idx, :, np.atleast_1d(group)].T.sum(axis=1)[:, np.newaxis]
+                for group in ts_cgroups
+            ], axis=1)
+            for ts_idx, ts_cgroups in self.component_groups_.items()
+        }
+
+        return _cgrouped
+
+
+    def _validate_component_group_assignment(self,
+                                             timeseries_index,
+                                             groups):
+        if getattr(self, 'component_groups_', None) is None:
+            raise Exception('MSSA must be fit before assigning component groups.')
+
+        if timeseries_index not in self.component_groups_:
+            raise Exception('timeseries_index not in {}'.format(self.component_groups_.keys()))
+
+        if not isinstance(groups, (list, tuple, np.ndarray)):
+            raise Exception('groups must be a list of lists (or int), with each sub-list component indices')
+
+        for group in groups:
+            group = np.atleast_1d(group)
+            for ind in group:
+                if ind not in np.arange(self.components_.shape[2]):
+                    raise Exception('Component index {} not in valid range'.format(ind))
+
+        return True
+
+
+    def set_component_groups(self,
+                             component_groups_dict):
+        '''Method to assign component groupings via a dictionary. The dictionary
+        must be in the format:
+
+        `{timeseries_index:groups}`
+
+        Where `timeseries_index` is the column index of the timeseries, and
+        groups is a list of lists where each sublist contains indices for the
+        components in that particular group.
+
+        For example, if you were updating the component groupings for the first
+        two timeseries it might look something like this:
+
+        `{
+            0:[
+                [0,1,2],
+                [3],
+                [4,5],
+                [6,7,8]
+            ],
+            1:[
+                [0],
+                [1,2],
+                [3],
+                [4,5,6]
+            ]
+        }`
+
+        The passed in dictionary will update the `component_groups_` attribute.
+        Note that this function will raise an exception if the fit method has
+        not been run yet, since there are no components until decomposition occurs.
+
+        The `component_groups_` attribute defaults to one component per group
+        after fitting (as if all components are independent).
+
+        The `grouped_components_` attribute is a dictionary with timeseries
+        indices as keys and the grouped component matrix as values. These matrices
+        are the actual data representation of the groups that you specify in
+        `component_groups_`. If you change `component_groups_`, the `grouped_components_`
+        attribute will automatically update to reflect this.
+
+        Parameters
+        ----------
+        component_group_dict : dict
+            Dictionary with timeseries index as keys and list-of-list component
+            index groupings as values. Updates the `component_groups_` and
+            `grouped_components_` attributes.
+
+        '''
+        if not isinstance(component_groups_dict, dict):
+            raise Exception('Must provide a dict with ts_index:groups as key:value pairs')
+
+        for ts_idx, groups in component_groups_dict.items():
+            _ = self._validate_component_group_assignment(ts_idx, groups)
+
+        self.component_groups_.update(component_groups_dict)
+
+        return self
+
+
+    def set_ts_component_groups(self,
+                                timeseries_index,
+                                groups):
+        '''Method to assign component groupings via a timeseries index and a
+        list of lists, where each sublist is indices of the components for that
+        group. This is an alternative to the `set_component_groups` function.
+
+        For example if you were updating component 1 it may look something like
+        this:
+
+        `timeseries_index = 1
+        groups = [
+            [0],
+            [1,2],
+            [3],
+            [4,5,6]
+        ]
+
+        mssa.set_ts_component_groups(timeseries_index, groups)
+        }`
+
+        This will update the `component_groups_` attribute with the new groups
+        for the specified timeseries index.
+
+        Note that this function will raise an exception if the fit method has
+        not been run yet, since there are no components until decomposition occurs.
+
+        The `component_groups_` attribute defaults to one component per group
+        after fitting (as if all components are independent).
+
+        The `grouped_components_` attribute is a dictionary with timeseries
+        indices as keys and the grouped component matrix as values. These matrices
+        are the actual data representation of the groups that you specify in
+        `component_groups_`. If you change `component_groups_`, the `grouped_components_`
+        attribute will automatically update to reflect this.
+
+        Parameters
+        ----------
+        timeseries_index : int
+            Column index of the timeseries to update component groupings for.
+        groups : list
+            List of lists, where each sub-list is indices for components in
+            that particular group.
+        '''
+
+        _ = self._validate_component_group_assignment(timeseries_index, groups)
+        self.component_groups_[timeseries_index] = groups
+
+        return self
+
+
 
     def forecast(self,
                  timepoints_out,
@@ -612,7 +768,7 @@ class MSSA:
         '''
 
         if use_components is None:
-            use_components = np.arange(left_singular_vectors.shape[1])
+            use_components = np.arange(self.components_.shape[2])
         elif isinstance(use_components, int):
             use_components = np.arange(use_components)
 
