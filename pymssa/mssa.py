@@ -165,9 +165,13 @@ class MSSA:
                  window_size=None,
                  n_components='svht',
                  variance_explained_threshold=0.95,
-                 pa_percentile_threshold=95,
+                 pa_percentile_threshold=90,
                  svd_method='randomized',
                  varimax=False,
+                 component_orders=True,
+                 component_aics=True,
+                 component_bics=True,
+                 component_loocvs=False,
                  verbose=True):
 
         self.set_params(window_size=window_size,
@@ -176,6 +180,10 @@ class MSSA:
                         pa_percentile_threshold=pa_percentile_threshold,
                         svd_method=svd_method,
                         varimax=varimax,
+                        component_orders=component_orders,
+                        component_aics=component_aics,
+                        component_bics=component_bics,
+                        component_loocvs=component_loocvs,
                         verbose=verbose)
 
 
@@ -189,6 +197,10 @@ class MSSA:
             pa_percentile_threshold=self.pa_percentile_threshold,
             svd_method=self.svd_method,
             varimax=self.varimax,
+            component_orders=self.component_orders,
+            component_aics=self.component_aics,
+            component_bics=self.component_bics,
+            component_loocvs=self.component_loocvs,
             verbose=self.verbose
         )
 
@@ -226,6 +238,12 @@ class MSSA:
             max_iter=max_iter
         )
 
+        # T = varimax_rotation(
+        #     left_singular_vectors,
+        #     max_iter=max_iter,
+        #     tol=tol
+        # )
+
         U = left_singular_vectors @ T
         slen = singular_values.shape[0]
         s = np.diag(T[:slen, :slen].T @ np.diag(singular_values) @ T[:slen, :slen])
@@ -240,7 +258,7 @@ class MSSA:
                                                K,
                                                rank,
                                                singular_values,
-                                               iterations=100):
+                                               iterations=10):
         '''
         Performs parallel analysis to help select the appropriate number of MSSA
         components to keep. The algorithm follows these steps:
@@ -309,6 +327,21 @@ class MSSA:
 
         return adjusted_rank
 
+    def _leverage(self, X):
+        H = np.linalg.multi_dot([X, np.linalg.pinv(np.dot(X.T, X)), X.T])
+        h = np.diag(H)
+        return h
+
+    def _loocv(self, resids, leverage):
+        loocv = np.mean((resids / (1 - leverage)) ** 2)
+        return loocv
+
+    def _aic(self, n, k, ssr):
+        return n * np.log(ssr/n) + (2 * k)
+
+    def _bic(self, n, k, ssr):
+        return n * np.log(ssr/n) + (np.log(n) * k)
+
 
 
     def _calculate_optimal_reconstruction_orders(self,
@@ -327,19 +360,79 @@ class MSSA:
 
         optimal_orders = optimal_orders.astype(int)
 
+        ordered_components = order_components(
+            components,
+            optimal_orders
+        )
+
         order_explained_variance = np.zeros_like(optimal_orders).astype(float)
+
         for ts_idx in range(timeseries.shape[1]):
-            ts_comp = components[ts_idx, :, :]
-            ts_comp = ts_comp[:, optimal_orders[:, ts_idx]]
-            # ts_comp = np.cumsum(ts_comp, axis=1)
+            cumulative_components = np.cumsum(ordered_components[ts_idx, :, :], axis=1)
+            ts = timeseries[:, ts_idx]
 
             order_explained_variance[:, ts_idx] = np.apply_along_axis(
-                partial(explained_variance_score, timeseries[:, ts_idx]),
+                partial(explained_variance_score, ts),
                 0,
-                ts_comp
+                cumulative_components
             )
 
-        return optimal_orders, order_explained_variance
+        order_aics, order_bics, order_loocvs = None, None, None
+
+        if any([self.component_aics, self.component_bics, self.component_loocvs]):
+
+            cumulative_ordered_components = np.cumsum(ordered_components, axis=2)
+
+            cumulative_component_residuals = ordered_cumulative_component_residuals(
+                timeseries,
+                cumulative_ordered_components
+            )
+
+            if self.component_aics:
+                if self.verbose:
+                    print('Calculating (ordered) component AICs')
+
+                order_aics = batch_calculate_component_aics(
+                    self.N_,
+                    self.P_,
+                    cumulative_component_residuals
+                )
+
+            if self.component_bics:
+                if self.verbose:
+                    print('Calculating (ordered) component BICs')
+
+                order_bics = batch_calculate_component_bics(
+                    self.N_,
+                    self.P_,
+                    cumulative_component_residuals
+                )
+
+            if self.component_loocvs:
+                if self.verbose:
+                    print('Calculating (ordered) component LOOCVs')
+
+                leverages = np.zeros_like(components)
+                for ts_idx in tqdm(range(timeseries.shape[1]), disable=(not self.verbose)):
+                    for component_idx in range(components.shape[2]):
+                        leverages[ts_idx, :, component_idx] = calculate_leverage(
+                            components[ts_idx, :, :(component_idx + 1)]
+                        )
+
+                order_loocvs = batch_calculate_component_loocvs(
+                    self.N_,
+                    self.P_,
+                    components,
+                    cumulative_component_residuals,
+                    leverages
+                )
+
+
+        return (optimal_orders,
+                order_explained_variance,
+                order_aics,
+                order_bics,
+                order_loocvs)
 
 
 
@@ -382,9 +475,22 @@ class MSSA:
                 raise Exception("pa_percentile_threshold must be > 0 and <= 100.")
 
         # check svd method
-        if not self.svd_method in ['randomized', 'exact']:
-            raise Exception("svd_method must be one of 'randomized', 'exact'.")
+        svd_options = ['randomized', 'exact', 'robust']
+        if not self.svd_method in svd_options:
+            raise Exception("svd_method must be one of", svd_options)
 
+
+    def _construct_trajectory_matrix(self,
+                                     timeseries,
+                                     L,
+                                     K):
+
+        trajectory_matrix = vertically_stacked_trajectory_matrices(
+            timeseries,
+            L,
+            K
+        )
+        return trajectory_matrix
 
 
     def fit(self,
@@ -459,9 +565,24 @@ class MSSA:
         self.K_ = self.N_ - self.L_ + 1
 
         if self.verbose:
+            print('Performing MC-SSA noise reduction reconstructions.')
+
+            mc_ssa_recons = []
+            for ts_idx in range(self.P_):
+                ts = self.timeseries_[:, ts_idx]
+                ts = ts - np.mean(ts)
+                recon = monte_carlo_ssa_reconstruction(
+                    ts,
+                    self.L_,
+                    self.K_
+                )
+                mc_ssa_recons.append(recon)
+            self.timeseries_ = np.array(mc_ssa_recons).T
+
+        if self.verbose:
             print('Constructing trajectory matrix')
 
-        self.trajectory_matrix_ = ts_matrix_to_trajectory_matrix(
+        self.trajectory_matrix_ = self._construct_trajectory_matrix(
             self.timeseries_,
             self.L_,
             self.K_
@@ -486,12 +607,15 @@ class MSSA:
             if self.verbose:
                 print('Applying structured varimax to singular vectors')
 
-            self.left_singular_vectors_, self.singular_values_ = self._apply_structured_varimax(
+            U, s = self._apply_structured_varimax(
                 self.left_singular_vectors_,
                 self.singular_values_,
                 self.P_,
                 self.L_
             )
+
+            self.left_singular_vectors_ = U
+            self.singular_values_ = s
 
         exp_var, exp_var_ratio = sv_to_explained_variance_ratio(
             self.singular_values_,
@@ -536,27 +660,50 @@ class MSSA:
 
 
         if self.verbose:
+            print('Constructing factor vectors')
+
+        self.factor_vectors_ = calculate_factor_vectors(
+            self.trajectory_matrix_,
+            self.left_singular_vectors_,
+            self.singular_values_,
+            self.rank_
+        )
+
+
+        if self.verbose:
             print('Constructing components')
 
         self.components_ = incremental_component_reconstruction(
-            self.trajectory_matrix_,
             self.left_singular_vectors_,
+            self.factor_vectors_,
             self.singular_values_,
             self.rank_,
             self.P_,
             self.N_,
-            self.L_
+            self.L_,
+            self.K_
         )
 
-        if self.verbose:
-            print('Calculating optimal reconstruction orders')
+        if (self.component_orders or
+            any([self.component_aics,
+                 self.component_bics,
+                 self.component_loocvs])):
 
-        ranks, rank_exp_var = self._calculate_optimal_reconstruction_orders(
-            self.timeseries_,
-            self.components_
-        )
+            if self.verbose:
+                print('Calculating optimal reconstruction orders')
+
+            ranks, rank_exp_var, aics, bics, loocvs = self._calculate_optimal_reconstruction_orders(
+                self.timeseries_,
+                self.components_
+            )
+        else:
+            ranks, rank_exp_var, aics, bics, loocvs = None, None, None, None, None
+
         self.component_ranks_ = ranks
         self.component_ranks_explained_variance_ = rank_exp_var
+        self.component_ranks_aics_ = aics
+        self.component_ranks_bics_ = bics
+        self.component_ranks_loocvs_ = loocvs
 
         self.component_groups_ = {
             ts_idx:[i for i in range(self.components_.shape[2])]
@@ -742,6 +889,24 @@ class MSSA:
         return self
 
 
+    def _recurrent_forecast(self,
+                            timepoints_out,
+                            components,
+                            left_singular_vectors,
+                            P,
+                            L,
+                            use_components):
+
+        forecasted = vmssa_recurrent_forecast(
+            timepoints_out,
+            components,
+            left_singular_vectors,
+            P,
+            L,
+            use_components=use_components
+        )
+        return forecasted
+
 
     def forecast(self,
                  timepoints_out,
@@ -772,7 +937,7 @@ class MSSA:
         elif isinstance(use_components, int):
             use_components = np.arange(use_components)
 
-        forecasted = vmssa_recurrent_forecast(
+        forecasted = self._recurrent_forecast(
             timepoints_out,
             self.components_,
             self.left_singular_vectors_,
@@ -785,4 +950,68 @@ class MSSA:
             timeseries_indices = np.atleast_1d(timeseries_indices)
             forecasted = forecasted[timeseries_indices, :]
 
+        return forecasted.T
+
+
+
+
+class HMSSA(MSSA):
+    '''Horizontal construction (H-MSSA) Multivariate Singular Spectrum Analysis
+    '''
+
+    def __init__(self,
+                 window_size=None,
+                 n_components='svht',
+                 variance_explained_threshold=0.95,
+                 pa_percentile_threshold=90,
+                 svd_method='randomized',
+                 varimax=False,
+                 component_orders=True,
+                 component_aics=True,
+                 component_bics=True,
+                 component_loocvs=False,
+                 verbose=True):
+
+        super().__init__(window_size=window_size,
+                         n_components=n_components,
+                         variance_explained_threshold=variance_explained_threshold,
+                         pa_percentile_threshold=pa_percentile_threshold,
+                         svd_method=svd_method,
+                         varimax=varimax,
+                         component_orders=component_orders,
+                         component_aics=component_aics,
+                         component_bics=component_bics,
+                         component_loocvs=component_loocvs,
+                         verbose=verbose)
+
+
+    def _construct_trajectory_matrix(self,
+                                     timeseries,
+                                     L,
+                                     K):
+
+        trajectory_matrix = horizontally_stacked_trajectory_matrix(
+            timeseries,
+            L,
+            K
+        )
+        return trajectory_matrix
+
+
+    def _recurrent_forecast(self,
+                            timepoints_out,
+                            components,
+                            left_singular_vectors,
+                            P,
+                            L,
+                            use_components):
+
+        forecasted = hmssa_recurrent_forecast(
+            timepoints_out,
+            components,
+            left_singular_vectors,
+            P,
+            L,
+            use_components=use_components
+        )
         return forecasted

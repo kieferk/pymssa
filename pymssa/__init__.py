@@ -1,1 +1,1 @@
-from .mssa import MSSA
+from .mssa import MSSA, HMSSA
