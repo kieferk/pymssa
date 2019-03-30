@@ -30,11 +30,11 @@ With a large enough dataset you will still run into problems, particularly for t
 
 ---
 
-# Demo of `MSSA` on Austrailian Wine Dataset
+# Demo of `MSSA` on Australian Wine Dataset
 
 To demonstrate the features of the `MSSA` class, and provide a general walkthrough of the steps involved in a standard multivariate singular spectrum analysis, I will load an example dataset that comes packaged with the `Rssa` R package.
 
-This data has 7 timeseries and 187 observations (some of which are null values). It is monthly data spanning from 1980 to 1995, and tracks sales of Austrailian wine. The columns are types of wine, including:
+This data has 7 timeseries and 187 observations (some of which are null values). It is monthly data spanning from 1980 to 1995, and tracks sales of Australian wine. The columns are types of wine, including:
 - Total
 - Drywhite
 - Fortified
